@@ -1,0 +1,53 @@
+cabal-version:          2.4
+
+name:                   irc0
+version:                0.1.0.0
+synopsis:               Bare-bones, programmable IRC client
+description:            This client focuses and providing a thin skeleton
+                        of an IRC client which support adding functionality
+                        via loadable modules.
+bug-reports:            https://github.com/glguy/irc0/issues
+license:                ISC
+license-file:           LICENSE
+author:                 Eric Mertens
+maintainer:             emertens@gmail.com
+copyright:              2019 Eric Mertens
+extra-source-files:     CHANGELOG.md
+
+executable irc0
+
+  main-is:              Main.hs
+  hs-source-dirs:       src
+  default-language:     Haskell2010
+
+  other-modules:
+    Textbox
+    UI
+    Client
+    ClientToC
+    CToClient
+    Connection
+    EventLoop
+
+  include-dirs:
+    include
+
+  ghc-options:
+    -threaded -Wall
+
+  build-depends:
+    async       ^>=2.2.1,
+    base        ^>=4.12.0.0,
+    containers  ^>=0.6.0,
+    hookup      ^>=0.2.2,
+    lens        ^>=4.17.1,
+    stm         ^>=2.5.0.0,
+    text        ^>=1.2.3.1,
+    unix        ^>=2.7.2.2,
+    vty         ^>=5.25.1,
+
+
+  if os(Linux)
+      ld-options: -Wl,--dynamic-list=exec/linux_exported_symbols.txt
+  if os(Darwin)
+      ld-options: -Wl,-exported_symbols_list,macos_exported_symbols.txt
