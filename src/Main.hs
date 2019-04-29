@@ -7,7 +7,6 @@ import Graphics.Vty
 
 import Client
 import EventLoop
-import UI
 
 withVty :: Config -> (Vty -> IO a) -> IO a
 withVty config = bracket (mkVty config) shutdown
@@ -18,8 +17,7 @@ main =
      cl <-
        withVty config $ \vty ->
          do (w,h) <- displayBounds (outputIface vty)
-            let ui = emptyUI w h
-            cl <- newClient ui
+            cl <- newClient w h
             eventLoop vty cl
      _cl' <- foldM shutdownExtension cl (view clExts cl)
      return ()

@@ -30,12 +30,12 @@ data NextStep = Continue | Quit
 
 makeLenses ''Client
 
-newClient :: UI -> IO Client
-newClient ui =
+newClient :: Int -> Int -> IO Client
+newClient w h =
   do mvar <- newEmptyMVar
      stab <- newStablePtr mvar
      return Client
-       { _clUI       = ui
+       { _clUI       = emptyUI w h
        , _clCommands = standardCommands
        , _clStable   = stab
        , _clMVar     = mvar
