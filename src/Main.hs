@@ -1,3 +1,4 @@
+{-# Options_GHC -Wno-unused-do-bind -Wno-name-shadowing #-}
 module Main where
 
 import Control.Exception
@@ -14,10 +15,10 @@ withVty config = bracket (mkVty config) shutdown
 main :: IO ()
 main =
   do config <- standardIOConfig
-     cl <-
-       withVty config $ \vty ->
-         do (w,h) <- displayBounds (outputIface vty)
-            cl <- newClient w h
-            eventLoop vty cl
-     _cl' <- foldM shutdownExtension cl (view clExts cl)
+     withVty config $ \vty ->
+       do (w,h) <- displayBounds (outputIface vty)
+          cl    <- newClient w h
+          cl    <- eventLoop vty cl
+          -- quit all open connections
+          foldM shutdownExtension cl (view clExts cl)
      return ()

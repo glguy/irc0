@@ -24,8 +24,8 @@ executable irc0
     Textbox
     UI
     Client
-    ClientToC
-    CToClient
+    Extension
+    CApi
     Connection
     EventLoop
 

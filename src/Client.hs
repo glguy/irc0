@@ -11,7 +11,8 @@ import Foreign.StablePtr
 import qualified Data.Map as Map
 import qualified Data.Text as Text
 
-import ClientToC
+import Extension (Extension)
+import qualified Extension as Extension
 import Connection
 import UI
 
@@ -22,7 +23,7 @@ data Client = Client
   , _clCommands :: Map Text Command
   , _clStable   :: StablePtr (MVar Client)
   , _clMVar     :: MVar Client
-  , _clExts     :: [Extension (Ptr ())]
+  , _clExts     :: [Extension]
   , _clConns    :: Map Text IrcConnection
   }
 
@@ -67,15 +68,15 @@ connCommand name cl =
          do for_ old \oldC -> cancelConnection oldC
             return (Continue, cl1 & clUI . uiFocus .~ Just key)
 
+
 loadCommand :: Command
 loadCommand path cl =
-  do ext <- openExtension path
-     (cl1, ptr) <- parked cl (extStartup ext (castStablePtrToPtr (view clStable cl)))
-     return (Continue, over clExts (ext{extData = ptr} :) cl1)
+  do ext <- Extension.open path
+     (cl1, ext') <- parked cl (Extension.startup (castStablePtrToPtr (view clStable cl)) ext)
+     return (Continue, over clExts (ext':) cl1)
 
-shutdownExtension :: Client -> Extension (Ptr ()) -> IO Client
-shutdownExtension cl ext =
-  fst <$> parked cl (extShutdown ext (extData ext))
+shutdownExtension :: Client -> Extension -> IO Client
+shutdownExtension cl ext = fst <$> parked cl (Extension.shutdown ext)
 
 parked :: Client -> IO b -> IO (Client, b)
 parked cl m =
@@ -84,13 +85,13 @@ parked cl m =
      cl1 <- takeMVar (view clMVar cl)
      return (cl1, res)
 
-reentry :: Ptr () -> (Client -> IO Client) -> IO ()
+reentry :: Ptr () -> (Client -> IO (Client, a)) -> IO a
 reentry stab k =
   do mvar <- deRefStablePtr (castPtrToStablePtr stab) :: IO (MVar Client)
-     modifyMVar_ mvar k
+     modifyMVar mvar k
 
 clientMessage :: Text -> Client -> IO Client
 clientMessage msg cl =
   fmap fst $ parked cl $
   for_ (view clExts cl) \ext ->
-    messageExtension ext msg
+    Extension.onMessage ext msg

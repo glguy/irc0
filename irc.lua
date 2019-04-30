@@ -1,0 +1,1 @@
+irc.writeline('File works')

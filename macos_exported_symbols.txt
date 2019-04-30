@@ -1,1 +1,2 @@
-_ircclient_add_message
+_ircclient_print
+_ircclient_send
