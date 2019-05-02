@@ -1,2 +1,4 @@
 _ircclient_print
 _ircclient_send
+_ircclient_hook_command
+_ircclient_unhook

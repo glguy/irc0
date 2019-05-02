@@ -1,53 +1,54 @@
 {-# Language BlockArguments, OverloadedStrings, TemplateHaskell #-}
 module Client where
 
-import Control.Concurrent
 import Control.Lens
 import Data.Foldable
 import Data.Map (Map)
 import Data.Text (Text)
-import Foreign.Ptr
-import Foreign.StablePtr
 import qualified Data.Map as Map
-import qualified Data.Text as Text
+import HookMap (HookMap)
+import qualified Bag as Bag
+import Bag (Bag)
 
-import Extension (Extension)
-import qualified Extension as Extension
 import Connection
 import UI
 
-type Command = String -> Client -> IO (NextStep, Client)
+type Command = Text -> Client -> IO (NextStep, Client)
 
 data Client = Client
-  { _clUI :: !UI
+  { _clUI       :: !UI
   , _clCommands :: Map Text Command
-  , _clStable   :: StablePtr (MVar Client)
-  , _clMVar     :: MVar Client
-  , _clExts     :: [Extension]
+  , _clExts     :: Bag Extension
   , _clConns    :: Map Text IrcConnection
+  }
+
+data Extension = Extension
+  { _onMessage  :: Client -> Text -> IO Client
+  , _onShutdown :: Client -> IO Client
+  , _onCommand  :: HookMap Text Command
   }
 
 data NextStep = Continue | Quit
 
 makeLenses ''Client
+makeLenses ''Extension
 
-newClient :: Int -> Int -> IO Client
+newClient :: Int -> Int -> Client
 newClient w h =
-  do mvar <- newEmptyMVar
-     stab <- newStablePtr mvar
-     return Client
-       { _clUI       = emptyUI w h
-       , _clCommands = standardCommands
-       , _clStable   = stab
-       , _clMVar     = mvar
-       , _clExts     = []
-       , _clConns    = Map.empty
-       }
+  Client
+    { _clUI        = emptyUI w h
+    , _clCommands  = standardCommands
+    , _clExts      = Bag.empty
+    , _clConns     = Map.empty
+    }
+
+addExtension :: Client -> Extension -> (Bag.Key, Client)
+addExtension cl ext = cl & clExts %%~ Bag.insert ext
 
 standardCommands :: Map Text Command
 standardCommands =
   Map.fromList
-    [("load", loadCommand),
+    [--("load", loadCommand),
      ("conn", connCommand),
      ("exit", exitCommand),
      ("focus", focusCommand)]
@@ -57,41 +58,25 @@ exitCommand _ cl = return (Quit, cl)
 
 focusCommand :: Command
 focusCommand name cl =
-  return (Continue, cl & clUI . uiFocus ?~ Text.pack name)
+  return (Continue, cl & clUI . uiFocus ?~ name)
 
 connCommand :: Command
-connCommand name cl =
+connCommand key cl =
   do conn <- newConnection
-     let key = Text.pack name
      case cl & clConns . at key <<.~ Just conn of
        (old, cl1) ->
          do for_ old \oldC -> cancelConnection oldC
             return (Continue, cl1 & clUI . uiFocus .~ Just key)
 
-
-loadCommand :: Command
-loadCommand path cl =
-  do ext <- Extension.open path
-     (cl1, ext') <- parked cl (Extension.startup (castStablePtrToPtr (view clStable cl)) ext)
-     return (Continue, over clExts (ext':) cl1)
-
-shutdownExtension :: Client -> Extension -> IO Client
-shutdownExtension cl ext = fst <$> parked cl (Extension.shutdown ext)
-
-parked :: Client -> IO b -> IO (Client, b)
-parked cl m =
-  do putMVar (view clMVar cl) cl
-     res <- m
-     cl1 <- takeMVar (view clMVar cl)
-     return (cl1, res)
-
-reentry :: Ptr () -> (Client -> IO (Client, a)) -> IO a
-reentry stab k =
-  do mvar <- deRefStablePtr (castPtrToStablePtr stab) :: IO (MVar Client)
-     modifyMVar mvar k
-
 clientMessage :: Text -> Client -> IO Client
 clientMessage msg cl =
-  fmap fst $ parked cl $
-  for_ (view clExts cl) \ext ->
-    Extension.onMessage ext msg
+  foldlM
+    (\cl_ ext -> view onMessage ext cl_ msg)
+    cl
+    (view clExts cl)
+
+shutdownClient :: Client -> IO ()
+shutdownClient cl =
+  do -- quit all open connections
+     _cl <- foldlM (\cl_ ext -> view onShutdown ext cl_) cl (view clExts cl)
+     return ()

@@ -16,8 +16,9 @@ import Textbox
 import UI
 import Client
 import Connection
+import qualified HookMap
 
-eventLoop :: Vty -> Client -> IO Client
+eventLoop :: Vty -> Client -> IO ()
 eventLoop vty cl =
   do update vty (uiPicture (view clUI cl))
 
@@ -32,7 +33,7 @@ eventLoop vty cl =
      (next, cl') <- action
      case next of
        Continue -> eventLoop vty cl'
-       Quit     -> return cl'
+       Quit     -> shutdownClient cl'
 
 handleNetEvent :: Client -> Text -> NetEvent -> IO (NextStep, Client)
 handleNetEvent cl key ev =
@@ -60,9 +61,10 @@ execute cl =
   in
   case parseCommand input of
     Just (cmd, args) ->
-      case view (clCommands . at (Text.pack cmd)) cl of
-        Just h -> h args (set (clUI . uiTextbox) emptyTextbox cl)
-        Nothing -> return (Continue, cl)
+      case toListOf (clCommands . ix (Text.pack cmd)) cl ++
+           toListOf (clExts . folded . onCommand . folding (HookMap.lookup (Text.pack cmd))) cl of
+        [] -> return (Continue, cl)
+        h:_ -> h (Text.pack args) (set (clUI . uiTextbox) emptyTextbox cl)
     Nothing ->
       case view (clUI . uiFocus) cl of
         Nothing -> return (Continue, cl)

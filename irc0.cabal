@@ -24,10 +24,12 @@ executable irc0
     Textbox
     UI
     Client
-    Extension
-    CApi
+    Extension.CApi
     Connection
     EventLoop
+    HookMap
+    NestedIO
+    Bag
 
   include-dirs:
     include
