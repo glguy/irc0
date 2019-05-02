@@ -29,7 +29,7 @@ executable irc0
     Connection
     EventLoop
     HookMap
-    NestedIO
+    WithIO
     Bag
 
   include-dirs:

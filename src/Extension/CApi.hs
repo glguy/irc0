@@ -26,7 +26,7 @@ import UI (uiLines)
 import qualified HookMap
 import qualified Bag
 import Bag (Bag)
-import NestedIO
+import WithIO
 
 capiExtension :: Extension
 capiExtension = newExtension & onCommand %~
@@ -203,23 +203,24 @@ ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userP
        return (cl1, fromIntegral hookId)
   where
     impl cext txt cl =
-        runNestedIO serial \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
-      do cl' <- parked cext cl (\_ -> dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr)
+      runWithIO serial \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
+      do cl' <-
+           parked cext cl \_ ->
+             dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
          return (Continue, cl')
       where
-        serial :: NestedIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
+        serial :: WithIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
         serial =
           do let ws = Text.words txt
                  wsEol = eolWords txt
 
-             let w x = nest1 (Text.withCStringLen x)
-             (ptrs   , sizes   ) <- unzip <$> traverse w ws
-             (ptrsEol, sizesEol) <- unzip <$> traverse w wsEol
+             (ptrs   , sizes   ) <- unzip <$> traverse exportText ws
+             (ptrsEol, sizesEol) <- unzip <$> traverse exportText wsEol
 
-             ptrsArr <- nest1 (withArray ptrs)
-             sizesArr <- nest1 (withArray (fromIntegral <$> sizes))
-             ptrsEolArr <- nest1 (withArray ptrsEol)
-             sizesEolArr <- nest1 (withArray (fromIntegral <$> sizesEol))
+             ptrsArr     <- exportArray ptrs
+             sizesArr    <- exportArray sizes
+             ptrsEolArr  <- exportArray ptrsEol
+             sizesEolArr <- exportArray sizesEol
 
              return (ptrsArr, sizesArr,
                      ptrsEolArr, sizesEolArr,
