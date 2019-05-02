@@ -7,6 +7,7 @@ import Data.Map (Map)
 import Data.Text (Text)
 import qualified Data.Map as Map
 import HookMap (HookMap)
+import qualified HookMap
 import qualified Bag as Bag
 import Bag (Bag)
 
@@ -17,7 +18,6 @@ type Command = Text -> Client -> IO (NextStep, Client)
 
 data Client = Client
   { _clUI       :: !UI
-  , _clCommands :: Map Text Command
   , _clExts     :: Bag Extension
   , _clConns    :: Map Text IrcConnection
   }
@@ -28,16 +28,22 @@ data Extension = Extension
   , _onCommand  :: HookMap Text Command
   }
 
-data NextStep = Continue | Quit
+data NextStep = Continue | Quit | Skip
 
 makeLenses ''Client
 makeLenses ''Extension
+
+newExtension :: Extension
+newExtension = Extension
+  { _onMessage = \cl _ -> return cl
+  , _onShutdown = return
+  , _onCommand = HookMap.empty
+  }
 
 newClient :: Int -> Int -> Client
 newClient w h =
   Client
     { _clUI        = emptyUI w h
-    , _clCommands  = standardCommands
     , _clExts      = Bag.empty
     , _clConns     = Map.empty
     }
@@ -45,28 +51,6 @@ newClient w h =
 addExtension :: Client -> Extension -> (Bag.Key, Client)
 addExtension cl ext = cl & clExts %%~ Bag.insert ext
 
-standardCommands :: Map Text Command
-standardCommands =
-  Map.fromList
-    [--("load", loadCommand),
-     ("conn", connCommand),
-     ("exit", exitCommand),
-     ("focus", focusCommand)]
-
-exitCommand :: Command
-exitCommand _ cl = return (Quit, cl)
-
-focusCommand :: Command
-focusCommand name cl =
-  return (Continue, cl & clUI . uiFocus ?~ name)
-
-connCommand :: Command
-connCommand key cl =
-  do conn <- newConnection
-     case cl & clConns . at key <<.~ Just conn of
-       (old, cl1) ->
-         do for_ old \oldC -> cancelConnection oldC
-            return (Continue, cl1 & clUI . uiFocus .~ Just key)
 
 clientMessage :: Text -> Client -> IO Client
 clientMessage msg cl =

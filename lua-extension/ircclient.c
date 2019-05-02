@@ -149,13 +149,18 @@ static void command_hook_entry
         lua_rawgeti(L, LUA_REGISTRYINDEX, cb->funref);
 
         lua_createtable(L, args, 0);
-
         for (int i = 0; i < args; i++) {
                 lua_pushlstring(L, word[i], word_lens[i]);
                 lua_rawseti(L, -2, i+1);
         }
 
-        if (lua_pcall(L, 1, 0, 0)) {
+        lua_createtable(L, args, 0);
+        for (int i = 0; i < args; i++) {
+                lua_pushlstring(L, word_eol[i], word_eol_lens[i]);
+                lua_rawseti(L, -2, i+1);
+        }
+
+        if (lua_pcall(L, 2, 0, 0)) {
                 lua_pop(L, 1);
         }
 }

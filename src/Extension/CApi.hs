@@ -1,7 +1,7 @@
-{-# Language CPP, BlockArguments #-}
+{-# Language OverloadedStrings, CPP, BlockArguments #-}
 module Extension.CApi
   ( reentry
-  , loadCommand
+  , capiExtension
 
   -- just to avoid the warnings
   , ircclient_print
@@ -27,6 +27,10 @@ import qualified HookMap
 import qualified Bag
 import Bag (Bag)
 import NestedIO
+
+capiExtension :: Extension
+capiExtension = newExtension & onCommand %~
+  snd . HookMap.insert 0 "load" loadCommand
 
 type Wrapper a = FunPtr a -> a
 type StartupFun = Ptr () -> IO (Ptr ())
@@ -55,15 +59,6 @@ foreign export ccall ircclient_unhook           :: Unhook
 foreign export ccall ircclient_hook_command     :: HookCommand
 #endif
 
-{-
-type CommandHook = [Text] -> [Text] -> IO Bool
-
-removeCommandHook :: Int -> Extension -> (Ptr (), Extension)
-removeCommandHook i ext =
-  case HookMap.remove i (extCommands ext) of
-    (mb, commands') -> (maybe nullPtr fst mb, ext { extCommands = commands' })
-
--}
 
 loadCommand :: Command
 loadCommand path cl =
@@ -208,17 +203,34 @@ ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userP
        return (cl1, fromIntegral hookId)
   where
     impl cext txt cl =
-        runNestedIO serial \(wordsPtr, wordsLenPtr, args) ->
-      do cl' <- parked cext cl (\_ -> dynCommandCb fp wordsPtr wordsLenPtr nullPtr nullPtr args userPtr)
+        runNestedIO serial \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
+      do cl' <- parked cext cl (\_ -> dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr)
          return (Continue, cl')
       where
-        serial :: NestedIO (Ptr CString, Ptr CSize, CSize)
+        serial :: NestedIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
         serial =
           do let ws = Text.words txt
-             ptrs <- traverse (\w -> nest1 (Text.withCStringLen w)) ws
-             let (a,b) = unzip ptrs
-             wordsPtr <- nest1 (withArray a)
-             wordsLenPtr <- nest1 (withArray (fromIntegral <$> b))
-             return (wordsPtr, wordsLenPtr, fromIntegral (length ws))
+                 wsEol = eolWords txt
 
- -- stab name priority callback help userdata = return 0
+             let w x = nest1 (Text.withCStringLen x)
+             (ptrs   , sizes   ) <- unzip <$> traverse w ws
+             (ptrsEol, sizesEol) <- unzip <$> traverse w wsEol
+
+             ptrsArr <- nest1 (withArray ptrs)
+             sizesArr <- nest1 (withArray (fromIntegral <$> sizes))
+             ptrsEolArr <- nest1 (withArray ptrsEol)
+             sizesEolArr <- nest1 (withArray (fromIntegral <$> sizesEol))
+
+             return (ptrsArr, sizesArr,
+                     ptrsEolArr, sizesEolArr,
+                     fromIntegral (length ws))
+
+eolWords :: Text -> [Text]
+eolWords start = go (noSpaces start)
+  where
+    noSpaces = Text.dropWhile (' '==)
+    toSpaces = Text.dropWhile (' '/=)
+
+    go txt
+      | Text.null txt = []
+      | otherwise = txt : go (noSpaces (toSpaces txt))

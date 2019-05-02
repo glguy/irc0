@@ -24,6 +24,7 @@ executable irc0
     Textbox
     UI
     Client
+    Extension.Base
     Extension.CApi
     Connection
     EventLoop

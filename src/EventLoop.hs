@@ -20,6 +20,7 @@ import qualified HookMap
 
 eventLoop :: Vty -> Client -> IO ()
 eventLoop vty cl =
+
   do update vty (uiPicture (view clUI cl))
 
      let vtycase = handleVtyEvent cl <$> readTChan (_eventChannel (inputIface vty))
@@ -32,8 +33,9 @@ eventLoop vty cl =
 
      (next, cl') <- action
      case next of
-       Continue -> eventLoop vty cl'
        Quit     -> shutdownClient cl'
+       Continue -> eventLoop vty cl'
+       Skip     -> eventLoop vty cl'
 
 handleNetEvent :: Client -> Text -> NetEvent -> IO (NextStep, Client)
 handleNetEvent cl key ev =
@@ -61,11 +63,11 @@ execute cl =
   in
   case parseCommand input of
     Just (cmd, args) ->
-      let key = Text.pack cmd in
-      case toListOf (clCommands . ix (Text.pack cmd)) cl ++
-           HookMap.lookup key (view onCommand <$> views clExts toList cl) of
-        [] -> return (Continue, cl)
-        h:_ -> h (Text.pack args) (set (clUI . uiTextbox) emptyTextbox cl)
+      let key = Text.pack cmd
+          args' = Text.pack args in
+      case HookMap.lookup key (view onCommand <$> views clExts toList cl) of
+        [] -> return (Continue, cl) -- leaves command in place
+        hs -> runHandlers (map ($ args') hs) cl1
     Nothing ->
       case view (clUI . uiFocus) cl of
         Nothing -> return (Continue, cl)
@@ -75,6 +77,15 @@ execute cl =
             Just conn ->
                do sendConnection conn (Text.pack input)
                   return (Continue, cl1)
+
+runHandlers :: [Client -> IO (NextStep, Client)] -> Client -> IO (NextStep, Client)
+runHandlers [] cl = return (Continue, cl)
+runHandlers (h:hs) cl =
+  do (next, cl') <- h cl
+     case next of
+       Continue -> runHandlers hs cl'
+       Quit     -> return (Quit, cl')
+       Skip     -> return (Skip, cl')
 
 parseCommand :: String -> Maybe (String, String)
 parseCommand str

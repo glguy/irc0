@@ -3,12 +3,14 @@
 module Main where
 
 import Control.Exception
-import Control.Lens
 import Graphics.Vty
 
 import Client
 import EventLoop
-import Extension.CApi (loadCommand)
+import Extension.Base (baseExtension)
+import Extension.CApi (capiExtension)
+import qualified Bag
+import Control.Lens
 
 withVty :: Config -> (Vty -> IO a) -> IO a
 withVty config = bracket (mkVty config) shutdown
@@ -19,5 +21,6 @@ main =
      withVty config $ \vty ->
        do (w,h) <- displayBounds (outputIface vty)
           let cl = newClient w h
-                 & clCommands . at "load" ?~ loadCommand
+                 & clExts %~ snd . Bag.insert baseExtension
+                           . snd . Bag.insert capiExtension
           eventLoop vty cl

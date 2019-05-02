@@ -6,6 +6,12 @@ end
 
 local shout_id = irc.hook_command('shout', 0, shout, 'get excited')
 
+local function msg(args, args_eol)
+    irc.writeline('PRIVMSG ' .. args[1] .. ' :' .. args_eol[2])
+end
+
+irc.hook_command('msg', 0, msg, 'send message')
+
 local function noshout(args)
     if shout_id then
             irc.unhook(shout_id)
