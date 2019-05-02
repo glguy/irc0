@@ -35,5 +35,7 @@ insert priority key value m = (i, m2)
     (i, m1) = m & nextKey <<+~ 1
     m2 = m1 & entries . at key . non' _Empty . at priority . non' _Empty . at i ?~ value
 
-lookup :: Ord k => k -> HookMap k a -> [a]
-lookup k = toListOf (entries . ix k . folded . folded)
+lookup :: Ord k => k -> [HookMap k a] -> [a]
+lookup k xs = toListOf (folded . folded) tmp
+  where
+    tmp = foldOf (folded . entries . ix k) xs

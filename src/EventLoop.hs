@@ -61,8 +61,9 @@ execute cl =
   in
   case parseCommand input of
     Just (cmd, args) ->
+      let key = Text.pack cmd in
       case toListOf (clCommands . ix (Text.pack cmd)) cl ++
-           toListOf (clExts . folded . onCommand . folding (HookMap.lookup (Text.pack cmd))) cl of
+           HookMap.lookup key (view onCommand <$> views clExts toList cl) of
         [] -> return (Continue, cl)
         h:_ -> h (Text.pack args) (set (clUI . uiTextbox) emptyTextbox cl)
     Nothing ->
