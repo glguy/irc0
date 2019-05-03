@@ -3,6 +3,10 @@
 
 struct ircclient;
 
+#define CONTINUE 0
+#define SKIP     1
+#define QUIT     2
+
 void ircclient_print
   (struct ircclient *token,
    const char *msg, size_t msglen);
@@ -12,7 +16,7 @@ int ircclient_send
    const char *net, size_t netlen,
    const char *cmd, size_t cmdlen);
 
-typedef void command_cb
+typedef int command_cb
   (const char *word[],
    size_t *word_lens,
    const char *word_eol[],
@@ -32,9 +36,7 @@ hook_id ircclient_hook_command
    size_t helplen,
    void *userdata);
 
-void *ircclient_unhook
-  (struct ircclient *token,
-   hook_id id);
+void *ircclient_unhook (struct ircclient *token, hook_id id);
 
 
 #endif

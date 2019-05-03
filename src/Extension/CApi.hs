@@ -47,9 +47,9 @@ data CExtension = CExtension
   , clientMVar :: !(MVar Client)
   }
 
-foreign import ccall "dynamic" dynStartup  :: Wrapper StartupFun
-foreign import ccall "dynamic" dynMessage  :: Wrapper MessageFun
-foreign import ccall "dynamic" dynShutdown :: Wrapper ShutdownFun
+foreign import ccall "dynamic" dynStartup   :: Wrapper StartupFun
+foreign import ccall "dynamic" dynMessage   :: Wrapper MessageFun
+foreign import ccall "dynamic" dynShutdown  :: Wrapper ShutdownFun
 foreign import ccall "dynamic" dynCommandCb :: Wrapper CommandCb
 
 #ifndef GHCI
@@ -63,9 +63,9 @@ foreign export ccall ircclient_hook_command     :: HookCommand
 loadCommand :: Command
 loadCommand path cl =
   do dl         <- dlopen (Text.unpack path) [RTLD_NOW, RTLD_LOCAL]
-     fpStartup  <- dlsym dl "startup_entry"
-     fpMessage  <- dlsym dl "message_entry"
-     fpShutdown <- dlsym dl "shutdown_entry"
+     fpStartup  <- dynStartup  <$> dlsym dl "startup_entry"
+     fpMessage  <- dynMessage  <$> dlsym dl "message_entry"
+     fpShutdown <- dynShutdown <$> dlsym dl "shutdown_entry"
 
      extIdRef'  <- newIORef (error "ext id not initialized")
      userRef'   <- newIORef nullPtr
@@ -90,9 +90,9 @@ loadCommand path cl =
 
      writeIORef extIdRef' i
 
-     (cl2, userPtr) <-
+     (userPtr, cl2) <-
        parked cext cl1 \_ptr ->
-         dynStartup fpStartup (castStablePtrToPtr stable)
+         fpStartup (castStablePtrToPtr stable)
 
      if nullPtr == userPtr then
        do let cl3 = addLine ("Failed to initialize: " <> path) cl2
@@ -103,38 +103,40 @@ loadCommand path cl =
           let cl3 = addLine ("Loaded: #" <> Text.pack (show j) <> " " <> path) cl2
           return (Continue, cl3)
 
-parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (Client, a)
+parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (a, Client)
 parked extSt cl k =
   do putMVar (clientMVar extSt) cl
      res <- k =<< readIORef (userRef extSt)
      cl1 <- takeMVar (clientMVar extSt)
-     return (cl1, res)
+     return (res, cl1)
 
 cMessage ::
   CExtension ->
-  FunPtr MessageFun ->
+  MessageFun ->
   Client ->
   Text -> IO (NextStep, Client)
 cMessage cext fp cl msg =
-  fmap convertResult $
   Text.withCStringLen msg \(msgptr, msglen) ->
   parked cext cl \ptr ->
-  dynMessage fp ptr msgptr (fromIntegral msglen)
+  fmap convertResult $
+  fp ptr msgptr (fromIntegral msglen)
 
-  where
-    convertResult (cl', ret) = (if ret == 0 then Continue else Skip, cl')
+convertResult :: CInt -> NextStep
+convertResult 1 = Skip
+convertResult 2 = Quit
+convertResult _ = Continue
 
 cShutdown ::
   CExtension ->
   StablePtr CExtension ->
-  FunPtr ShutdownFun ->
+  ShutdownFun ->
   DL ->
   Client ->
   IO Client
 cShutdown cext stab fp dl cl =
-  fmap fst $
+  fmap snd $
   parked cext cl \ptr ->
-  do dynShutdown fp ptr
+  do fp ptr
      dlclose dl
      freeStablePtr stab
 
@@ -184,7 +186,7 @@ type CommandCb =
   Ptr CString -> Ptr CSize ->
   CSize ->
   Ptr () ->
-  IO ()
+  IO CInt
 
 type HookCommand =
   Ptr () ->
@@ -198,38 +200,45 @@ ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userP
   Text.peekCStringLen (namePtr, fromIntegral nameLen) >>= \name ->
   reentry token \cext cl ->
     do extId <- readIORef (extIdRef cext)
-       let (i, cl1) = cl & clExts . singular (ix extId) . onCommand
-                        %%~ HookMap.insert (fromIntegral priority) name (impl cext)
+       let action = commandWrapper cext userPtr fp
+           (i, cl1) = cl & clExts . singular (ix extId) . onCommand
+                        %%~ HookMap.insert (fromIntegral priority) name action
 
        hooks <- readIORef (hooksRef cext)
        let (Bag.Key hookId, hooks') = Bag.insert (CommandHook i userPtr) hooks
        writeIORef (hooksRef cext) hooks'
 
        return (cl1, fromIntegral hookId)
-  where
-    impl cext txt cl =
-      runWithIO serial \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
-      do (cl', ()) <-
-           parked cext cl \_ ->
-             dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
-         return (Continue, cl')
-      where
-        serial :: WithIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
-        serial =
-          do let ws = Text.words txt
-                 wsEol = eolWords txt
 
-             (ptrs   , sizes   ) <- unzip <$> traverse exportText ws
-             (ptrsEol, sizesEol) <- unzip <$> traverse exportText wsEol
+commandWrapper ::
+  CExtension ->
+  Ptr () ->
+  FunPtr CommandCb ->
+  Text ->
+  Client ->
+  IO (NextStep, Client)
+commandWrapper cext userPtr fp txt cl =
+  runWithIO (exportArgs txt) \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
+  parked cext cl   \_ptr ->
+  convertResult <$>
+  dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
 
-             ptrsArr     <- exportArray ptrs
-             sizesArr    <- exportArray sizes
-             ptrsEolArr  <- exportArray ptrsEol
-             sizesEolArr <- exportArray sizesEol
+exportArgs :: Text -> WithIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
+exportArgs txt =
+  do let ws = Text.words txt
+         wsEol = eolWords txt
 
-             return (ptrsArr, sizesArr,
-                     ptrsEolArr, sizesEolArr,
-                     fromIntegral (length ws))
+     (ptrs   , sizes   ) <- unzip <$> traverse exportText ws
+     (ptrsEol, sizesEol) <- unzip <$> traverse exportText wsEol
+
+     ptrsArr     <- exportArray ptrs
+     sizesArr    <- exportArray sizes
+     ptrsEolArr  <- exportArray ptrsEol
+     sizesEolArr <- exportArray sizesEol
+
+     return (ptrsArr, sizesArr,
+             ptrsEolArr, sizesEolArr,
+             fromIntegral (length ws))
 
 eolWords :: Text -> [Text]
 eolWords start = go (noSpaces start)
