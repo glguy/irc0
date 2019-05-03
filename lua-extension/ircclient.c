@@ -122,20 +122,51 @@ lua_State *startup_entry(void *X)
 
 void shutdown_entry(lua_State *L)
 {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &module_key);
+        lua_getfield(L, -1, "shutdown");
+        lua_remove(L, -2);
+
+        lua_pcall(L, 0, 0, 0);
+
         lua_close(L);
 }
 
-int message_entry(lua_State *L, const char *msg, size_t msg_len)
+int message_entry
+  (lua_State *L,
+   const char *net, size_t net_len,
+   const char *pfx, size_t pfx_len,
+   const char *cmd, size_t cmd_len,
+   const char **args, size_t *args_len,
+   size_t args_n)
 {
-        void *X;
-        memcpy(&X, lua_getextraspace(L), sizeof(X));
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &module_key);
+        lua_getfield(L, -1, "message");
+        lua_remove(L, -2);
 
-        CALL(print, L, msg, msg_len);
+        lua_pushlstring(L, net, net_len);
+        lua_pushlstring(L, pfx, pfx_len);
+        lua_pushlstring(L, cmd, cmd_len);
 
-        return 0;
+        lua_createtable(L, args_n, 0);
+        for (int i = 0; i < args_n; i++) {
+                lua_pushlstring(L, args[i], args_len[i]);
+                lua_rawseti(L, -2, i+1);
+        }
+
+        if (lua_pcall(L, 4, 1, 0)) {
+                size_t errlen;
+                const char *errmsg = lua_tolstring(L, -1, &errlen);
+                CALL(print, L, errmsg, errlen);
+                lua_pop(L, 1);
+                return 0;
+        } else {
+                int ret = lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                return ret;
+        }
 }
 
-static void command_hook_entry
+static int command_hook_entry
   (const char *word[],
    size_t *word_lens,
    const char *word_eol[],
@@ -160,10 +191,14 @@ static void command_hook_entry
                 lua_rawseti(L, -2, i+1);
         }
 
-        if (lua_pcall(L, 2, 0, 0)) {
+        if (lua_pcall(L, 2, 1, 0)) {
                 size_t errlen;
                 const char *errmsg = lua_tolstring(L, -1, &errlen);
                 CALL(print, L, errmsg, errlen);
                 lua_pop(L, 1);
         }
+
+        int ret = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        return ret;
 }

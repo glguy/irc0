@@ -8,6 +8,7 @@ import           Data.Map       (Map)
 import           Data.Text      (Text)
 import qualified Data.Map as Map
 import qualified Data.Text as Text
+import qualified Irc.RawIrcMsg as Irc
 
 import           Bag            (Bag)
 import           Connection
@@ -25,7 +26,7 @@ data Client = Client
   }
 
 data Extension = Extension
-  { _onMessage  :: Client -> Text -> IO (NextStep, Client)
+  { _onMessage  :: Client -> Text -> Irc.RawIrcMsg -> IO (NextStep, Client)
   , _onShutdown :: Client -> IO Client
   , _onCommand  :: HookMap Text Command
   }
@@ -37,7 +38,7 @@ makeLenses ''Extension
 
 newExtension :: Extension
 newExtension = Extension
-  { _onMessage = \cl _ -> return (Continue, cl)
+  { _onMessage = \cl _ _ -> return (Continue, cl)
   , _onShutdown = return
   , _onCommand = HookMap.empty
   }
@@ -56,10 +57,10 @@ addExtension cl ext = cl & clExts %%~ Bag.insert ext
 addLine :: Text -> Client -> Client
 addLine x cl = cl & clUI . uiLines %~ cons x
 
-clientMessage :: Text -> Client -> IO (NextStep, Client)
-clientMessage msg cl =
+clientMessage :: Text -> Irc.RawIrcMsg -> Client -> IO (NextStep, Client)
+clientMessage net msg cl =
   runHandlers
-    [ \cl_ -> view onMessage ext cl_ msg | ext <- toList (view clExts cl) ]
+    [ \cl_ -> view onMessage ext cl_ net msg | ext <- toList (view clExts cl) ]
     cl
 
 shutdownClient :: Client -> IO ()

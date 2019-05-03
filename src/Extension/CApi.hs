@@ -17,6 +17,7 @@ import Control.Concurrent
 import Data.IORef
 import Data.Text (Text)
 import Control.Lens
+import Control.Monad.IO.Class
 import qualified Data.Text.Foreign as Text
 import qualified Data.Text as Text
 
@@ -27,6 +28,8 @@ import qualified HookMap
 import qualified Bag
 import Bag (Bag)
 import WithIO
+import qualified Irc.RawIrcMsg as Irc
+import qualified Irc.UserInfo as Irc
 
 capiExtension :: Extension
 capiExtension = newExtension & onCommand %~
@@ -34,17 +37,25 @@ capiExtension = newExtension & onCommand %~
 
 type Wrapper a = FunPtr a -> a
 type StartupFun = Ptr () -> IO (Ptr ())
-type MessageFun = Ptr () -> CString -> CSize -> IO CInt
+
+type MessageFun =
+  Ptr () ->
+  CString -> CSize ->
+  CString -> CSize ->
+  CString -> CSize ->
+  Ptr CString -> Ptr CSize ->
+  CSize -> IO CInt
+
 type ShutdownFun = Ptr () -> IO ()
 
 data HookEntry
   = CommandHook !Int (Ptr ())
 
 data CExtension = CExtension
-  { extIdRef   :: IORef Bag.Key
-  , hooksRef   :: IORef (Bag HookEntry)
-  , userRef    :: IORef (Ptr ())
-  , clientMVar :: !(MVar Client)
+  { extIdRef   :: {-# Unpack #-} !(IORef Bag.Key)
+  , hooksRef   :: {-# Unpack #-} !(IORef (Bag HookEntry))
+  , userRef    :: {-# Unpack #-} !(IORef (Ptr ()))
+  , clientMVar :: {-# Unpack #-} !(MVar Client)
   }
 
 foreign import ccall "dynamic" dynStartup   :: Wrapper StartupFun
@@ -114,12 +125,27 @@ cMessage ::
   CExtension ->
   MessageFun ->
   Client ->
-  Text -> IO (NextStep, Client)
-cMessage cext fp cl msg =
-  Text.withCStringLen msg \(msgptr, msglen) ->
-  parked cext cl \ptr ->
-  fmap convertResult $
-  fp ptr msgptr (fromIntegral msglen)
+  Text ->
+  Irc.RawIrcMsg ->
+  IO (NextStep, Client)
+cMessage cext fp cl net msg =
+  evalWithIO $
+    do (netPtr,netLen) <- exportText net
+       (pfxPtr,pfxLen) <- exportText (maybe "" Irc.renderUserInfo (view Irc.msgPrefix msg))
+       (cmdPtr,cmdLen) <- exportText (view Irc.msgCommand msg)
+       (argPtrs,argLens) <- unzip <$> traverse exportText (view Irc.msgParams msg)
+       argPtrsArr <- exportArray argPtrs
+       argLensArr <- exportArray argLens
+       liftIO $
+         parked cext cl \ptr ->
+         fmap convertResult $
+         fp ptr
+            netPtr netLen
+            pfxPtr pfxLen
+            cmdPtr cmdLen
+            argPtrsArr argLensArr
+            (fromIntegral (length (view Irc.msgParams msg)))
+
 
 convertResult :: CInt -> NextStep
 convertResult 1 = Skip

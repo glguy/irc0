@@ -6,6 +6,7 @@ import Control.Lens
 import Data.Foldable
 import Control.Concurrent.STM
 import Data.Text (Text)
+import qualified Irc.RawIrcMsg as Irc
 
 import qualified Data.Text as Text
 import qualified Data.Map as Map
@@ -42,7 +43,10 @@ handleNetEvent cl key ev =
   case ev of
     NetEnd     msg -> return (Continue, cl & clUI . uiLines %~ (msg:)
                                            & clConns . at key .~ Nothing)
-    NetMessage msg -> clientMessage msg cl
+    NetMessage txt ->
+      case Irc.parseRawIrcMsg txt of
+        Nothing -> return (Continue, cl)
+        Just msg -> clientMessage key msg cl
 
 handleVtyEvent :: Vty -> Client -> Event -> IO (NextStep, Client)
 handleVtyEvent vty cl ev =

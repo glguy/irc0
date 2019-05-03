@@ -32,3 +32,10 @@ local function noshout(args)
 end
 
 irc.hook_command('noshout', 0, noshout, 'no more get excited')
+
+local M = {}
+function M.message(net, prefix, cmd, args)
+        irc.writeline(net .. '> ' .. prefix .. ': ' .. cmd .. ' ' .. table.concat(args, '/'))
+end
+
+return M
