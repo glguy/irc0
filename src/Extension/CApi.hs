@@ -34,7 +34,7 @@ capiExtension = newExtension & onCommand %~
 
 type Wrapper a = FunPtr a -> a
 type StartupFun = Ptr () -> IO (Ptr ())
-type MessageFun = Ptr () -> CString -> CSize -> IO ()
+type MessageFun = Ptr () -> CString -> CSize -> IO CInt
 type ShutdownFun = Ptr () -> IO ()
 
 data HookEntry
@@ -83,42 +83,46 @@ loadCommand path cl =
 
      let (i, cl1) = addExtension cl
            Extension
-             { _onMessage  = cMessage  cext fpMessage
+             { _onMessage  = cMessage cext fpMessage
              , _onShutdown = cShutdown cext stable fpShutdown dl
              , _onCommand  = HookMap.empty
              }
 
      writeIORef extIdRef' i
 
-     cl2 <- cStartup cext stable fpStartup cl1
-     return (Continue, cl2)
+     (cl2, userPtr) <-
+       parked cext cl1 \_ptr ->
+         dynStartup fpStartup (castStablePtrToPtr stable)
 
-parked :: CExtension -> Client -> (Ptr () -> IO ()) -> IO Client
+     if nullPtr == userPtr then
+       do let cl3 = addLine ("Failed to initialize: " <> path) cl2
+          return (Continue, cl3)
+     else
+       do writeIORef (userRef cext) userPtr
+          let Bag.Key j = i
+          let cl3 = addLine ("Loaded: #" <> Text.pack (show j) <> " " <> path) cl2
+          return (Continue, cl3)
+
+parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (Client, a)
 parked extSt cl k =
   do putMVar (clientMVar extSt) cl
-     k =<< readIORef (userRef extSt)
-     takeMVar (clientMVar extSt)
-
-cStartup ::
-  CExtension ->
-  StablePtr CExtension ->
-  FunPtr StartupFun ->
-  Client ->
-  IO Client
-cStartup cext stable fp cl =
-  parked cext cl \_ptr ->
-    do ptr <- dynStartup fp (castStablePtrToPtr stable)
-       writeIORef (userRef cext) ptr
+     res <- k =<< readIORef (userRef extSt)
+     cl1 <- takeMVar (clientMVar extSt)
+     return (cl1, res)
 
 cMessage ::
   CExtension ->
   FunPtr MessageFun ->
   Client ->
-  Text -> IO Client
+  Text -> IO (NextStep, Client)
 cMessage cext fp cl msg =
+  fmap convertResult $
   Text.withCStringLen msg \(msgptr, msglen) ->
   parked cext cl \ptr ->
   dynMessage fp ptr msgptr (fromIntegral msglen)
+
+  where
+    convertResult (cl', ret) = (if ret == 0 then Continue else Skip, cl')
 
 cShutdown ::
   CExtension ->
@@ -128,6 +132,7 @@ cShutdown ::
   Client ->
   IO Client
 cShutdown cext stab fp dl cl =
+  fmap fst $
   parked cext cl \ptr ->
   do dynShutdown fp ptr
      dlclose dl
@@ -204,7 +209,7 @@ ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userP
   where
     impl cext txt cl =
       runWithIO serial \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
-      do cl' <-
+      do (cl', ()) <-
            parked cext cl \_ ->
              dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
          return (Continue, cl')

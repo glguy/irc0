@@ -1,5 +1,17 @@
 irc.writeline('File works')
 
+local function eval(args, args_eol)
+        local chunk, err = load(args_eol[1], '=(eval)', 't')
+        if chunk then
+                irc.writeline('Chunk loaded')
+                chunk()
+        else
+                irc.writeline('Chunk failed: ' .. err)
+                error(err, 0)
+        end
+end
+irc.hook_command('eval', 0, eval, 'evaluate some Lua')
+
 local function shout(args)
     irc.writeline(table.concat(args, ':') .. '!')
 end

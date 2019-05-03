@@ -23,7 +23,7 @@ eventLoop vty cl =
 
   do update vty (uiPicture (view clUI cl))
 
-     let vtycase = handleVtyEvent cl <$> readTChan (_eventChannel (inputIface vty))
+     let vtycase = handleVtyEvent vty cl <$> readTChan (_eventChannel (inputIface vty))
          netcase name conn = handleNetEvent cl name <$> readTQueue (connEvents conn)
 
      action <- atomically
@@ -42,19 +42,19 @@ handleNetEvent cl key ev =
   case ev of
     NetEnd     msg -> return (Continue, cl & clUI . uiLines %~ (msg:)
                                            & clConns . at key .~ Nothing)
-    NetMessage msg ->
-      do cl' <- clientMessage msg cl
-         return (Continue, cl')
+    NetMessage msg -> clientMessage msg cl
 
-handleVtyEvent :: Client -> Event -> IO (NextStep, Client)
-handleVtyEvent cl ev =
+handleVtyEvent :: Vty -> Client -> Event -> IO (NextStep, Client)
+handleVtyEvent vty cl ev =
      case ev of
        EvKey (KChar c) [] -> return (Continue, over (clUI . uiTextbox) (tbInsert c) cl)
        EvKey KBS       [] -> return (Continue, over (clUI . uiTextbox) tbDeleteBack cl)
        EvKey KEnter    [] -> execute cl
-       EvResize w h       -> return (Continue, cl & clUI . uiWidth  .~ w
-                                                  & clUI . uiHeight .~ h)
-       _                  -> return (Continue, cl)
+       EvResize{} ->
+         do (w,h) <- displayBounds (outputIface vty)
+            return (Continue, cl & clUI . uiWidth  .~ w
+                                 & clUI . uiHeight .~ h)
+       _ -> return (Continue, cl)
 
 execute :: Client -> IO (NextStep, Client)
 execute cl =
@@ -78,14 +78,6 @@ execute cl =
                do sendConnection conn (Text.pack input)
                   return (Continue, cl1)
 
-runHandlers :: [Client -> IO (NextStep, Client)] -> Client -> IO (NextStep, Client)
-runHandlers [] cl = return (Continue, cl)
-runHandlers (h:hs) cl =
-  do (next, cl') <- h cl
-     case next of
-       Continue -> runHandlers hs cl'
-       Quit     -> return (Quit, cl')
-       Skip     -> return (Skip, cl')
 
 parseCommand :: String -> Maybe (String, String)
 parseCommand str

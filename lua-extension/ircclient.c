@@ -161,6 +161,9 @@ static void command_hook_entry
         }
 
         if (lua_pcall(L, 2, 0, 0)) {
+                size_t errlen;
+                const char *errmsg = lua_tolstring(L, -1, &errlen);
+                CALL(print, L, errmsg, errlen);
                 lua_pop(L, 1);
         }
 }
