@@ -63,3 +63,6 @@ uiPicture ui =
     , picLayers = [uiImage ui]
     , picBackground = ClearBackground
     }
+
+clearTextbox :: UI -> UI
+clearTextbox = set uiTextbox emptyTextbox

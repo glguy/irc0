@@ -1,4 +1,4 @@
-{-# Language TemplateHaskell #-}
+{-# Language ScopedTypeVariables, TemplateHaskell #-}
 module HookMap
   ( HookMap
   , empty
@@ -8,34 +8,30 @@ module HookMap
   ) where
 
 import Control.Lens
+import Data.Foldable (toList)
 import Data.Map (Map)
 import Data.IntMap (IntMap)
 import qualified Data.Map as Map
+import qualified Bag
+import Bag (Bag)
 
-data HookMap k a = HookMap
-  { _nextKey :: Int
-  , _entries :: Map k (IntMap (IntMap a))
-     -- event-name priority hook-id
-  }
-
-makeLenses ''HookMap
+newtype HookMap k a = HookMap { unHookMap :: Map k (IntMap (Bag a)) }
 
 empty :: HookMap k a
-empty = HookMap
-  { _nextKey = 1
-  , _entries = Map.empty
-  }
+empty = HookMap Map.empty
 
-remove :: Int -> HookMap k a -> HookMap k a
-remove i m = m & entries . traverse . traverse %~ sans i
+access :: (Functor f, Ord k) => k -> Int -> LensLike' f (HookMap k a) (Bag a)
+access key priority f (HookMap m) =
+  HookMap <$> (at key . non' _Empty . at priority . anon Bag.empty Bag.isEmpty) f m
 
-insert :: Ord k => Int -> k -> a -> HookMap k a -> (Int, HookMap k a)
-insert priority key value m = (i, m2)
-  where
-    (i, m1) = m & nextKey <<+~ 1
-    m2 = m1 & entries . at key . non' _Empty . at priority . non' _Empty . at i ?~ value
+remove :: Ord k => k -> Int -> Bag.Key -> HookMap k a -> HookMap k a
+remove key priority i m = m & access key priority %~ Bag.delete i
 
-lookup :: Ord k => k -> [HookMap k a] -> [a]
+insert :: Ord k => Int -> k -> a -> HookMap k a -> (Bag.Key, HookMap k a)
+insert priority key value m = m & access key priority %%~ Bag.insert value
+
+lookup :: forall k a. Ord k => k -> [HookMap k a] -> [a]
 lookup k xs = toListOf (folded . folded) tmp
   where
-    tmp = foldOf (folded . entries . ix k) xs
+    tmp :: IntMap [a]
+    tmp = foldMapOf (folded . to unHookMap . ix k) (fmap toList) xs

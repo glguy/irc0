@@ -17,7 +17,18 @@ import           UI
 import qualified Bag as Bag
 import qualified HookMap
 
-type Command = Text -> Client -> IO (NextStep, Client)
+-- | Client command callback
+type OnCommand =
+  Text          {- ^ command string     -} ->
+  Client        {- ^ client state       -} ->
+  IO (NextStep, Client)
+
+-- | Network message callback
+type OnMessage =
+  Text          {- ^ network identifier -} ->
+  Irc.RawIrcMsg {- ^ irc message        -} ->
+  Client        {- ^ client state       -} ->
+  IO (NextStep, Client)
 
 data Client = Client
   { _clUI       :: !UI
@@ -26,9 +37,9 @@ data Client = Client
   }
 
 data Extension = Extension
-  { _onMessage  :: Client -> Text -> Irc.RawIrcMsg -> IO (NextStep, Client)
-  , _onShutdown :: Client -> IO Client
-  , _onCommand  :: HookMap Text Command
+  { _onShutdown :: Client -> IO Client
+  , _onMessage  :: HookMap Text OnMessage
+  , _onCommand  :: HookMap Text OnCommand
   }
 
 data NextStep = Continue | Quit | Skip
@@ -38,8 +49,8 @@ makeLenses ''Extension
 
 newExtension :: Extension
 newExtension = Extension
-  { _onMessage = \cl _ _ -> return (Continue, cl)
-  , _onShutdown = return
+  { _onShutdown = return
+  , _onMessage = HookMap.empty
   , _onCommand = HookMap.empty
   }
 
@@ -59,9 +70,18 @@ addLine x cl = cl & clUI . uiLines %~ cons x
 
 clientMessage :: Text -> Irc.RawIrcMsg -> Client -> IO (NextStep, Client)
 clientMessage net msg cl =
-  runHandlers
-    [ \cl_ -> view onMessage ext cl_ net msg | ext <- toList (view clExts cl) ]
-    cl
+  do let hs = HookMap.lookup (view Irc.msgCommand msg) (view onMessage <$> views clExts toList cl)
+     (next, cl') <- runHandlers [ h net msg | h <- hs ] cl
+     case next of
+       Continue -> return (Continue, addLine (Irc.asUtf8 (Irc.renderRawIrcMsg msg)) cl')
+       _        -> return (next, cl')
+
+clientCommand :: Text -> Text -> Client -> IO (NextStep, Client)
+clientCommand cmd args cl =
+  case HookMap.lookup cmd (view onCommand <$> views clExts toList cl) of
+    [] -> return (Continue, cl) -- leaves command in place
+    hs -> runHandlers (map (\h -> h args) hs)
+        $ over clUI UI.clearTextbox cl
 
 shutdownClient :: Client -> IO ()
 shutdownClient cl =

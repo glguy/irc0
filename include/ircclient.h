@@ -24,6 +24,14 @@ typedef int command_cb
    size_t args,
    void *user_data);
 
+typedef int message_cb
+  (const char *net, size_t netlen,
+   const char *pfx, size_t pfxlen,
+   const char *cmd, size_t cmdlen,
+   const char **args, size_t *arg_lens,
+   size_t arg_len,
+   void *user_data);
+
 typedef long hook_id;
 
 hook_id ircclient_hook_command
@@ -34,6 +42,13 @@ hook_id ircclient_hook_command
    command_cb *cb,
    const char *help,
    size_t helplen,
+   void *userdata);
+
+hook_id ircclient_hook_message
+  (struct ircclient *token,
+   const char *name, size_t namelen,
+   int priority,
+   message_cb *cb,
    void *userdata);
 
 void *ircclient_unhook (struct ircclient *token, hook_id id);

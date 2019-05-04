@@ -12,6 +12,7 @@
 static char module_key;
 
 static command_cb command_hook_entry;
+static message_cb message_hook_entry;
 
 struct callback_node {
         lua_State *L;
@@ -19,7 +20,7 @@ struct callback_node {
         int funref;
 };
 
-int lib_print(lua_State *L)
+int lib_writeline(lua_State *L)
 {
         size_t len;
         const char *msg = luaL_checklstring(L, 1, &len);
@@ -67,6 +68,28 @@ static int lib_hook_command(lua_State *L)
         return 1;
 }
 
+static int lib_hook_message(lua_State *L)
+{
+        size_t namelen;
+        const char *name = luaL_checklstring(L, 1, &namelen);
+        int priority = luaL_checkinteger(L, 2);
+        // callback function #3
+
+        lua_pushvalue(L, 3);
+        int funref = luaL_ref(L, LUA_REGISTRYINDEX);
+        struct callback_node *cb = lua_newuserdata(L, sizeof (struct callback_node));
+        int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+        cb->myref = ref;
+        cb->funref = funref;
+        cb->L = L;
+
+        hook_id hid = CALL(hook_message, L, name, namelen, priority, message_hook_entry, cb);
+        lua_pushinteger(L, hid);
+
+        return 1;
+}
+
 static int lib_unhook(lua_State *L) {
         hook_id hid = luaL_checkinteger(L, 1);
 
@@ -82,10 +105,47 @@ static int lib_unhook(lua_State *L) {
         return 0;
 }
 
+/***
+Replacement for Lua's print function
+@function print
+@tparam string message Message to print to console
+@usage print('This shows up on the * window')
+*/
+static int lib_print(lua_State *L)
+{
+        int n = lua_gettop(L);  /* number of arguments */
+
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
+
+        lua_getglobal(L, "tostring");
+        for (int i = 1; i <= n; i++) {
+                lua_pushvalue(L, -1);  /* tostring */
+                lua_pushvalue(L, i);   /* value to print */
+                lua_call(L, 1, 1);
+
+                if (!lua_isstring(L, -1)) {
+                        return luaL_error(L, "'tostring' must return a string to 'print'");
+                }
+                if (i > 1) {
+                        luaL_addchar(&b, '\t');
+                }
+                luaL_addvalue(&b);
+        }
+
+        luaL_pushresult(&b);
+        size_t msglen;
+        const char *msg = luaL_tolstring(L, -1, &msglen);
+        CALL(print, L, msg, msglen);
+
+        return 0;
+}
+
 static luaL_Reg irc_lib[] =
-  { { "writeline", lib_print}
+  { { "writeline", lib_writeline}
   , { "send"     , lib_send }
   , { "hook_command", lib_hook_command }
+  , { "hook_message", lib_hook_message }
   , { "unhook", lib_unhook }
   , {}
   };
@@ -94,6 +154,9 @@ void setup_library(lua_State *L)
 {
         luaL_newlib(L, irc_lib);
         lua_setglobal(L, "irc");
+
+        lua_pushcfunction(L, lib_print);
+        lua_setglobal(L, "print");
 }
 
 lua_State *startup_entry(void *X)
@@ -131,39 +194,45 @@ void shutdown_entry(lua_State *L)
         lua_close(L);
 }
 
-int message_entry
-  (lua_State *L,
-   const char *net, size_t net_len,
+static int message_hook_entry
+  (const char *net, size_t net_len,
    const char *pfx, size_t pfx_len,
    const char *cmd, size_t cmd_len,
    const char **args, size_t *args_len,
-   size_t args_n)
+   size_t args_n,
+   void *user_data)
 {
-        lua_rawgetp(L, LUA_REGISTRYINDEX, &module_key);
-        lua_getfield(L, -1, "message");
-        lua_remove(L, -2);
+        struct callback_node * const cb = user_data;
+        lua_State * const L = cb->L;
 
-        lua_pushlstring(L, net, net_len);
-        lua_pushlstring(L, pfx, pfx_len);
-        lua_pushlstring(L, cmd, cmd_len);
+        // function
+        lua_rawgeti(L, LUA_REGISTRYINDEX, cb->funref);
 
-        lua_createtable(L, args_n, 0);
+        lua_pushlstring(L, net, net_len); // argument 1
+        lua_pushlstring(L, pfx, pfx_len); // argument 2
+        lua_pushlstring(L, cmd, cmd_len); // argument 3
+
+        lua_createtable(L, args_n, 0); // argument 4
         for (int i = 0; i < args_n; i++) {
                 lua_pushlstring(L, args[i], args_len[i]);
                 lua_rawseti(L, -2, i+1);
         }
 
+        int ret = 0;
+
+        // Call function
         if (lua_pcall(L, 4, 1, 0)) {
+                // Error remains on stack
                 size_t errlen;
                 const char *errmsg = lua_tolstring(L, -1, &errlen);
                 CALL(print, L, errmsg, errlen);
-                lua_pop(L, 1);
-                return 0;
         } else {
-                int ret = lua_tointeger(L, -1);
-                lua_pop(L, 1);
-                return ret;
+                // Return value remains on stack
+                ret = lua_tointeger(L, -1);
         }
+
+        lua_pop(L, 1);
+        return ret;
 }
 
 static int command_hook_entry
@@ -177,28 +246,37 @@ static int command_hook_entry
         struct callback_node * const cb = user_data;
         lua_State * const L = cb->L;
 
+        // Function
         lua_rawgeti(L, LUA_REGISTRYINDEX, cb->funref);
 
+        // Argument 1
         lua_createtable(L, args, 0);
         for (int i = 0; i < args; i++) {
                 lua_pushlstring(L, word[i], word_lens[i]);
                 lua_rawseti(L, -2, i+1);
         }
 
+        // Argument 2
         lua_createtable(L, args, 0);
         for (int i = 0; i < args; i++) {
                 lua_pushlstring(L, word_eol[i], word_eol_lens[i]);
                 lua_rawseti(L, -2, i+1);
         }
 
+        int ret = 0;
+
+        // Call function with two arguments
         if (lua_pcall(L, 2, 1, 0)) {
+                // Error remains on stack
                 size_t errlen;
                 const char *errmsg = lua_tolstring(L, -1, &errlen);
                 CALL(print, L, errmsg, errlen);
-                lua_pop(L, 1);
+        } else {
+                // Return value remains on stack
+                ret = lua_tointeger(L, -1);
+                return ret;
         }
 
-        int ret = lua_tointeger(L, -1);
         lua_pop(L, 1);
         return ret;
 }

@@ -8,6 +8,7 @@ module Extension.CApi
   , ircclient_send
   , ircclient_unhook
   , ircclient_hook_command
+  , ircclient_hook_message
   ) where
 
 import Foreign
@@ -38,18 +39,11 @@ capiExtension = newExtension & onCommand %~
 type Wrapper a = FunPtr a -> a
 type StartupFun = Ptr () -> IO (Ptr ())
 
-type MessageFun =
-  Ptr () ->
-  CString -> CSize ->
-  CString -> CSize ->
-  CString -> CSize ->
-  Ptr CString -> Ptr CSize ->
-  CSize -> IO CInt
-
 type ShutdownFun = Ptr () -> IO ()
 
 data HookEntry
-  = CommandHook !Int (Ptr ())
+  = CommandHook !Text !Int !Bag.Key (Ptr ())
+  | MessageHook !Text !Int !Bag.Key (Ptr ())
 
 data CExtension = CExtension
   { extIdRef   :: {-# Unpack #-} !(IORef Bag.Key)
@@ -59,23 +53,23 @@ data CExtension = CExtension
   }
 
 foreign import ccall "dynamic" dynStartup   :: Wrapper StartupFun
-foreign import ccall "dynamic" dynMessage   :: Wrapper MessageFun
 foreign import ccall "dynamic" dynShutdown  :: Wrapper ShutdownFun
 foreign import ccall "dynamic" dynCommandCb :: Wrapper CommandCb
+foreign import ccall "dynamic" dynMessageCb :: Wrapper MessageCb
 
 #ifndef GHCI
 foreign export ccall ircclient_print            :: Print
 foreign export ccall ircclient_send             :: Send
 foreign export ccall ircclient_unhook           :: Unhook
 foreign export ccall ircclient_hook_command     :: HookCommand
+foreign export ccall ircclient_hook_message     :: HookMessage
 #endif
 
 
-loadCommand :: Command
+loadCommand :: OnCommand
 loadCommand path cl =
   do dl         <- dlopen (Text.unpack path) [RTLD_NOW, RTLD_LOCAL]
      fpStartup  <- dynStartup  <$> dlsym dl "startup_entry"
-     fpMessage  <- dynMessage  <$> dlsym dl "message_entry"
      fpShutdown <- dynShutdown <$> dlsym dl "shutdown_entry"
 
      extIdRef'  <- newIORef (error "ext id not initialized")
@@ -94,8 +88,8 @@ loadCommand path cl =
 
      let (i, cl1) = addExtension cl
            Extension
-             { _onMessage  = cMessage cext fpMessage
-             , _onShutdown = cShutdown cext stable fpShutdown dl
+             { _onShutdown = cShutdown cext stable fpShutdown dl
+             , _onMessage  = HookMap.empty
              , _onCommand  = HookMap.empty
              }
 
@@ -120,32 +114,6 @@ parked extSt cl k =
      res <- k =<< readIORef (userRef extSt)
      cl1 <- takeMVar (clientMVar extSt)
      return (res, cl1)
-
-cMessage ::
-  CExtension ->
-  MessageFun ->
-  Client ->
-  Text ->
-  Irc.RawIrcMsg ->
-  IO (NextStep, Client)
-cMessage cext fp cl net msg =
-  evalWithIO $
-    do (netPtr,netLen) <- exportText net
-       (pfxPtr,pfxLen) <- exportText (maybe "" Irc.renderUserInfo (view Irc.msgPrefix msg))
-       (cmdPtr,cmdLen) <- exportText (view Irc.msgCommand msg)
-       (argPtrs,argLens) <- unzip <$> traverse exportText (view Irc.msgParams msg)
-       argPtrsArr <- exportArray argPtrs
-       argLensArr <- exportArray argLens
-       liftIO $
-         parked cext cl \ptr ->
-         fmap convertResult $
-         fp ptr
-            netPtr netLen
-            pfxPtr pfxLen
-            cmdPtr cmdLen
-            argPtrsArr argLensArr
-            (fromIntegral (length (view Irc.msgParams msg)))
-
 
 convertResult :: CInt -> NextStep
 convertResult 1 = Skip
@@ -203,8 +171,10 @@ ircclient_unhook token hookId =
      writeIORef (hooksRef cext) (Bag.delete key hooks)
      case preview (ix key) hooks of
        Nothing -> return (cl, nullPtr)
-       Just (CommandHook i ptr) ->
-         return (cl & clExts . ix extId . onCommand %~ HookMap.remove i, ptr)
+       Just (CommandHook cmd prio i ptr) ->
+         return (cl & clExts . ix extId . onCommand %~ HookMap.remove cmd prio i, ptr)
+       Just (MessageHook cmd prio i ptr) ->
+         return (cl & clExts . ix extId . onMessage %~ HookMap.remove cmd prio i, ptr)
 
 
 type CommandCb =
@@ -222,16 +192,17 @@ type HookCommand =
   Ptr () ->
   IO CLong
 ircclient_hook_command :: HookCommand
-ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userPtr =
+ircclient_hook_command token namePtr nameLen prio fp _helpPtr _helpLen userPtr =
   Text.peekCStringLen (namePtr, fromIntegral nameLen) >>= \name ->
+  let priority = fromIntegral prio in
   reentry token \cext cl ->
     do extId <- readIORef (extIdRef cext)
-       let action = commandWrapper cext userPtr fp
+       let action = commandWrapper cext userPtr (dynCommandCb fp)
            (i, cl1) = cl & clExts . singular (ix extId) . onCommand
-                        %%~ HookMap.insert (fromIntegral priority) name action
+                        %%~ HookMap.insert priority name action
 
        hooks <- readIORef (hooksRef cext)
-       let (Bag.Key hookId, hooks') = Bag.insert (CommandHook i userPtr) hooks
+       let (Bag.Key hookId, hooks') = Bag.insert (CommandHook name priority i userPtr) hooks
        writeIORef (hooksRef cext) hooks'
 
        return (cl1, fromIntegral hookId)
@@ -239,7 +210,7 @@ ircclient_hook_command token namePtr nameLen priority fp _helpPtr _helpLen userP
 commandWrapper ::
   CExtension ->
   Ptr () ->
-  FunPtr CommandCb ->
+  CommandCb ->
   Text ->
   Client ->
   IO (NextStep, Client)
@@ -247,7 +218,70 @@ commandWrapper cext userPtr fp txt cl =
   runWithIO (exportArgs txt) \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
   parked cext cl   \_ptr ->
   convertResult <$>
-  dynCommandCb fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
+  fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
+
+------------------------------------------------------------------------
+
+type MessageCb =
+  CString -> CSize ->
+  CString -> CSize ->
+  CString -> CSize ->
+  Ptr CString -> Ptr CSize ->
+  CSize ->
+  Ptr () ->
+  IO CInt
+
+
+type HookMessage =
+  Ptr () ->
+  CString -> CSize ->
+  CInt -> FunPtr MessageCb ->
+  Ptr () ->
+  IO CLong
+ircclient_hook_message :: HookMessage
+ircclient_hook_message token namePtr nameLen prio fp userPtr =
+  Text.peekCStringLen (namePtr, fromIntegral nameLen) >>= \name ->
+  let priority = fromIntegral prio in
+  reentry token \cext cl ->
+    do extId <- readIORef (extIdRef cext)
+       let action = cMessage cext userPtr (dynMessageCb fp)
+           (i, cl1) = cl & clExts . singular (ix extId) . onMessage
+                        %%~ HookMap.insert priority name action
+
+       hooks <- readIORef (hooksRef cext)
+       let (Bag.Key hookId, hooks') = Bag.insert (MessageHook name priority i userPtr) hooks
+       writeIORef (hooksRef cext) hooks'
+
+       return (cl1, fromIntegral hookId)
+
+cMessage ::
+  CExtension ->
+  Ptr () ->
+  MessageCb ->
+  Text ->
+  Irc.RawIrcMsg ->
+  Client ->
+  IO (NextStep, Client)
+cMessage cext ptr fp net msg cl =
+  evalWithIO $
+    do (netPtr,netLen) <- exportText net
+       (pfxPtr,pfxLen) <- exportText (maybe "" Irc.renderUserInfo (view Irc.msgPrefix msg))
+       (cmdPtr,cmdLen) <- exportText (view Irc.msgCommand msg)
+       (argPtrs,argLens) <- unzip <$> traverse exportText (view Irc.msgParams msg)
+       argPtrsArr <- exportArray argPtrs
+       argLensArr <- exportArray argLens
+       liftIO $
+         parked cext cl \_ptr ->
+         fmap convertResult $
+         fp netPtr netLen
+            pfxPtr pfxLen
+            cmdPtr cmdLen
+            argPtrsArr argLensArr
+            (fromIntegral (length (view Irc.msgParams msg)))
+            ptr
+
+
+------------------------------------------------------------------------
 
 exportArgs :: Text -> WithIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
 exportArgs txt =

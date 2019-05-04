@@ -1,6 +1,6 @@
 {-# Language TypeFamilies, DeriveTraversable #-}
 module Bag
-  ( Bag, Key(..), empty, insert, delete, update ) where
+  ( Bag, Key(..), empty, insert, delete, update, isEmpty ) where
 
 import qualified Data.IntMap as IntMap
 import Data.IntMap (IntMap)
@@ -13,6 +13,9 @@ data Bag a = Bag !Int (IntMap a)
 
 empty :: Bag a
 empty = Bag 1 IntMap.empty
+
+isEmpty :: Bag a -> Bool
+isEmpty (Bag i _) = i == 1
 
 insert :: a -> Bag a -> (Key, Bag a)
 insert x (Bag next m) = (Key next, Bag (next+1) (IntMap.insert next x m))

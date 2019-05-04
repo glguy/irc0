@@ -3,6 +3,8 @@ module Extension.Base where
 
 import Control.Lens
 import Data.Foldable
+import qualified Irc.RawIrcMsg as Irc
+import qualified Irc.Commands as Irc
 
 import Client
 import Connection
@@ -14,21 +16,34 @@ import qualified Bag as Bag
 
 baseExtension :: Extension
 baseExtension =
-  let cmd k v = snd . HookMap.insert 0 k v in
-  newExtension & onCommand %~
-    cmd "conn"    connCommand .
-    cmd "exit"    exitCommand .
-    cmd "focus"   focusCommand .
-    cmd "unload"  unloadCommand
+  let hook k v = snd . HookMap.insert 0 k v in
+  newExtension
 
-exitCommand :: Command
+  & onCommand %~
+    hook "conn"    connCommand .
+    hook "exit"    exitCommand .
+    hook "focus"   focusCommand .
+    hook "unload"  unloadCommand
+
+  & onMessage %~
+    hook "PING"    pingMessage
+
+pingMessage :: OnMessage
+pingMessage net msg cl =
+  do forOf_ (clConns . ix net) cl \conn ->
+       let rsp = Irc.ircPong (view Irc.msgParams msg)
+           txt = Irc.asUtf8 (Irc.renderRawIrcMsg rsp)
+       in sendConnection conn txt
+     return (Continue, cl)
+
+exitCommand :: OnCommand
 exitCommand _ cl = return (Quit, cl)
 
-focusCommand :: Command
+focusCommand :: OnCommand
 focusCommand name cl =
   return (Continue, cl & clUI . uiFocus ?~ name)
 
-connCommand :: Command
+connCommand :: OnCommand
 connCommand key cl =
   do conn <- newConnection
      case cl & clConns . at key <<.~ Just conn of
@@ -36,7 +51,7 @@ connCommand key cl =
          do for_ old \oldC -> cancelConnection oldC
             return (Continue, cl1 & clUI . uiFocus .~ Just key)
 
-unloadCommand :: Command
+unloadCommand :: OnCommand
 unloadCommand arg cl =
   case readMaybe (Text.unpack arg) of
     Nothing -> return (Continue, cl)

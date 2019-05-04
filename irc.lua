@@ -3,8 +3,10 @@ irc.writeline('File works')
 local function eval(args, args_eol)
         local chunk, err = load(args_eol[1], '=(eval)', 't')
         if chunk then
-                irc.writeline('Chunk loaded')
-                chunk()
+                local results = {chunk()}
+                if #results ~= 0 then
+                        print(table.unpack(results))
+                end
         else
                 irc.writeline('Chunk failed: ' .. err)
                 error(err, 0)
@@ -33,9 +35,15 @@ end
 
 irc.hook_command('noshout', 0, noshout, 'no more get excited')
 
-local M = {}
-function M.message(net, prefix, cmd, args)
+local function onNotice(net, prefix, cmd, args)
         irc.writeline(net .. '> ' .. prefix .. ': ' .. cmd .. ' ' .. table.concat(args, '/'))
+        return 1
 end
+
+irc.hook_message('NOTICE', 0, onNotice)
+
+local M = {}
+
+function M.shutdown() end
 
 return M
