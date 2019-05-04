@@ -13,8 +13,10 @@ module Extension.CApi
 
 import Foreign
 import Foreign.C
-import System.Posix.DynamicLinker
-import Control.Concurrent
+import System.Posix.DynamicLinker (DL, dlopen, dlclose, dlsym, RTLDFlags(..))
+import Control.Concurrent (MVar, newEmptyMVar, takeMVar, putMVar, modifyMVar)
+import Control.Exception (bracketOnError)
+import Data.Char (isSpace)
 import Data.IORef
 import Data.Text (Text)
 import Control.Lens
@@ -68,8 +70,11 @@ foreign export ccall ircclient_hook_message     :: HookMessage
 
 loadCommand :: OnCommand
 loadCommand path cl =
-  do dl         <- dlopen (Text.unpack path) [RTLD_NOW, RTLD_LOCAL]
-     fpStartup  <- dynStartup  <$> dlsym dl "startup_entry"
+  bracketOnError
+    (dlopen (Text.unpack path) [RTLD_NOW, RTLD_LOCAL])
+    dlclose
+    \dl ->
+  do fpStartup  <- dynStartup  <$> dlsym dl "startup_entry"
      fpShutdown <- dynShutdown <$> dlsym dl "shutdown_entry"
 
      extIdRef'  <- newIORef (error "ext id not initialized")
@@ -108,13 +113,6 @@ loadCommand path cl =
           let cl3 = addLine ("Loaded: #" <> Text.pack (show j) <> " " <> path) cl2
           return (Continue, cl3)
 
-parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (a, Client)
-parked extSt cl k =
-  do putMVar (clientMVar extSt) cl
-     res <- k =<< readIORef (userRef extSt)
-     cl1 <- takeMVar (clientMVar extSt)
-     return (res, cl1)
-
 convertResult :: CInt -> NextStep
 convertResult 1 = Skip
 convertResult 2 = Quit
@@ -134,6 +132,7 @@ cShutdown cext stab fp dl cl =
      dlclose dl
      freeStablePtr stab
 
+------------------------------------------------------------------------
 
 reentry :: Ptr () -> (CExtension -> Client -> IO (Client, a)) -> IO a
 reentry stab k =
@@ -142,12 +141,23 @@ reentry stab k =
         do (cl', result) <- k cext cl
            return (cl', result)
 
+parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (a, Client)
+parked extSt cl k =
+  do putMVar (clientMVar extSt) cl
+     res <- k =<< readIORef (userRef extSt)
+     cl1 <- takeMVar (clientMVar extSt)
+     return (res, cl1)
+
+------------------------------------------------------------------------
+
 type Print = Ptr () -> CString -> CSize -> IO ()
 ircclient_print :: Print
 ircclient_print stab strPtr strLen =
   do str <- Text.peekCStringLen (strPtr, fromIntegral strLen)
      reentry stab \_i cl ->
        return (over (clUI . uiLines) (str :) cl, ())
+
+------------------------------------------------------------------------
 
 type Send = Ptr () -> CString -> CSize -> CString -> CSize -> IO CInt
 ircclient_send :: Send
@@ -160,6 +170,8 @@ ircclient_send stab netPtr netLen strPtr strLen =
          Just conn ->
            do sendConnection conn str
               return (cl, 0)
+
+------------------------------------------------------------------------
 
 type Unhook = Ptr () -> CLong -> IO (Ptr ())
 ircclient_unhook :: Unhook
@@ -176,6 +188,7 @@ ircclient_unhook token hookId =
        Just (MessageHook cmd prio i ptr) ->
          return (cl & clExts . ix extId . onMessage %~ HookMap.remove cmd prio i, ptr)
 
+------------------------------------------------------------------------
 
 type CommandCb =
   Ptr CString -> Ptr CSize ->
@@ -215,10 +228,15 @@ commandWrapper ::
   Client ->
   IO (NextStep, Client)
 commandWrapper cext userPtr fp txt cl =
-  runWithIO (exportArgs txt) \(wordsPtr, wordsLenPtr, eolPtr, eolLenPtr, args) ->
-  parked cext cl   \_ptr ->
-  convertResult <$>
-  fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
+  evalWithIO $
+  do let ws = Text.words txt
+     (wordsPtr, wordsLenPtr, args) <- exportTexts ws
+     (eolPtr, eolLenPtr, _) <- exportTexts (eolWords txt)
+     liftIO $
+       parked cext cl   \_ptr ->
+       convertResult <$>
+       fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
+
 
 ------------------------------------------------------------------------
 
@@ -267,9 +285,7 @@ cMessage cext ptr fp net msg cl =
     do (netPtr,netLen) <- exportText net
        (pfxPtr,pfxLen) <- exportText (maybe "" Irc.renderUserInfo (view Irc.msgPrefix msg))
        (cmdPtr,cmdLen) <- exportText (view Irc.msgCommand msg)
-       (argPtrs,argLens) <- unzip <$> traverse exportText (view Irc.msgParams msg)
-       argPtrsArr <- exportArray argPtrs
-       argLensArr <- exportArray argLens
+       (argPtrsArr, argLensArr, n) <- exportTexts (view Irc.msgParams msg)
        liftIO $
          parked cext cl \_ptr ->
          fmap convertResult $
@@ -277,34 +293,24 @@ cMessage cext ptr fp net msg cl =
             pfxPtr pfxLen
             cmdPtr cmdLen
             argPtrsArr argLensArr
-            (fromIntegral (length (view Irc.msgParams msg)))
+            n
             ptr
 
 
 ------------------------------------------------------------------------
 
-exportArgs :: Text -> WithIO (Ptr CString, Ptr CSize, Ptr CString, Ptr CSize, CSize)
-exportArgs txt =
-  do let ws = Text.words txt
-         wsEol = eolWords txt
-
-     (ptrs   , sizes   ) <- unzip <$> traverse exportText ws
-     (ptrsEol, sizesEol) <- unzip <$> traverse exportText wsEol
-
-     ptrsArr     <- exportArray ptrs
-     sizesArr    <- exportArray sizes
-     ptrsEolArr  <- exportArray ptrsEol
-     sizesEolArr <- exportArray sizesEol
-
-     return (ptrsArr, sizesArr,
-             ptrsEolArr, sizesEolArr,
-             fromIntegral (length ws))
+exportTexts :: [Text] -> WithIO (Ptr CString, Ptr CSize, CSize)
+exportTexts txts =
+  do (ptrs, sizes) <- unzip <$> traverse exportText txts
+     ptrArr        <- exportArray ptrs
+     sizArr        <- exportArray sizes
+     return (ptrArr, sizArr, fromIntegral (length txts))
 
 eolWords :: Text -> [Text]
 eolWords start = go (noSpaces start)
   where
-    noSpaces = Text.dropWhile (' '==)
-    toSpaces = Text.dropWhile (' '/=)
+    noSpaces = Text.dropWhile isSpace
+    toSpaces = Text.dropWhile isSpace
 
     go txt
       | Text.null txt = []
