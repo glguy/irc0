@@ -101,8 +101,7 @@ loadCommand path cl =
      writeIORef extIdRef' i
 
      (userPtr, cl2) <-
-       parked cext cl1 \_ptr ->
-         fpStartup (castStablePtrToPtr stable)
+       parked cext cl1 (fpStartup (castStablePtrToPtr stable))
 
      if nullPtr == userPtr then
        do let cl3 = addLine ("Failed to initialize: " <> path) cl2
@@ -127,8 +126,8 @@ cShutdown ::
   IO Client
 cShutdown cext stab fp dl cl =
   fmap snd $
-  parked cext cl \ptr ->
-  do fp ptr
+  parked cext cl $
+  do fp =<< readIORef (userRef cext)
      dlclose dl
      freeStablePtr stab
 
@@ -141,10 +140,10 @@ reentry stab k =
         do (cl', result) <- k cext cl
            return (cl', result)
 
-parked :: CExtension -> Client -> (Ptr () -> IO a) -> IO (a, Client)
+parked :: CExtension -> Client -> IO a -> IO (a, Client)
 parked extSt cl k =
   do putMVar (clientMVar extSt) cl
-     res <- k =<< readIORef (userRef extSt)
+     res <- k
      cl1 <- takeMVar (clientMVar extSt)
      return (res, cl1)
 
@@ -233,7 +232,7 @@ commandWrapper cext userPtr fp txt cl =
      (wordsPtr, wordsLenPtr, args) <- exportTexts ws
      (eolPtr, eolLenPtr, _) <- exportTexts (eolWords txt)
      liftIO $
-       parked cext cl   \_ptr ->
+       parked cext cl $
        convertResult <$>
        fp wordsPtr wordsLenPtr eolPtr eolLenPtr args userPtr
 
@@ -287,7 +286,7 @@ cMessage cext ptr fp net msg cl =
        (cmdPtr,cmdLen) <- exportText (view Irc.msgCommand msg)
        (argPtrsArr, argLensArr, n) <- exportTexts (view Irc.msgParams msg)
        liftIO $
-         parked cext cl \_ptr ->
+         parked cext cl $
          fmap convertResult $
          fp netPtr netLen
             pfxPtr pfxLen
