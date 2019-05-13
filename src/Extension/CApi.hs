@@ -3,12 +3,14 @@ module Extension.CApi
   ( reentry
   , capiExtension
 
-  -- just to avoid the warnings
+#ifdef GHCI
   , ircclient_print
   , ircclient_send
   , ircclient_unhook
   , ircclient_hook_command
   , ircclient_hook_message
+  , ircclient_query
+#endif
   ) where
 
 import Foreign
@@ -23,6 +25,7 @@ import Control.Lens
 import Control.Monad.IO.Class
 import qualified Data.Text.Foreign as Text
 import qualified Data.Text as Text
+import qualified Data.Map as Map
 
 import Client
 import Connection (sendConnection)
@@ -58,6 +61,7 @@ foreign import ccall "dynamic" dynStartup   :: Wrapper StartupFun
 foreign import ccall "dynamic" dynShutdown  :: Wrapper ShutdownFun
 foreign import ccall "dynamic" dynCommandCb :: Wrapper CommandCb
 foreign import ccall "dynamic" dynMessageCb :: Wrapper MessageCb
+foreign import ccall "dynamic" dynStringsCb :: Wrapper StringsCb
 
 #ifndef GHCI
 foreign export ccall ircclient_print            :: Print
@@ -65,6 +69,7 @@ foreign export ccall ircclient_send             :: Send
 foreign export ccall ircclient_unhook           :: Unhook
 foreign export ccall ircclient_hook_command     :: HookCommand
 foreign export ccall ircclient_hook_message     :: HookMessage
+foreign export ccall ircclient_query            :: Query
 #endif
 
 
@@ -133,12 +138,12 @@ cShutdown cext stab fp dl cl =
 
 ------------------------------------------------------------------------
 
-reentry :: Ptr () -> (CExtension -> Client -> IO (Client, a)) -> IO a
+reentry :: Ptr () -> (CExtension -> Client -> IO (a, Client)) -> IO a
 reentry stab k =
   do cext <- deRefStablePtr (castPtrToStablePtr stab) :: IO CExtension
      modifyMVar (clientMVar cext) \cl ->
         do (cl', result) <- k cext cl
-           return (cl', result)
+           return (result, cl')
 
 parked :: CExtension -> Client -> IO a -> IO (a, Client)
 parked extSt cl k =
@@ -152,23 +157,23 @@ parked extSt cl k =
 type Print = Ptr () -> CString -> CSize -> IO ()
 ircclient_print :: Print
 ircclient_print stab strPtr strLen =
-  do str <- Text.peekCStringLen (strPtr, fromIntegral strLen)
+  do str <- peekText strPtr strLen
      reentry stab \_i cl ->
-       return (over (clUI . uiLines) (str :) cl, ())
+       return ((), over (clUI . uiLines) (str :) cl)
 
 ------------------------------------------------------------------------
 
 type Send = Ptr () -> CString -> CSize -> CString -> CSize -> IO CInt
 ircclient_send :: Send
 ircclient_send stab netPtr netLen strPtr strLen =
-  do net <- Text.peekCStringLen (netPtr, fromIntegral netLen)
-     str <- Text.peekCStringLen (strPtr, fromIntegral strLen)
+  do net <- peekText netPtr netLen
+     str <- peekText strPtr strLen
      reentry stab \_i cl ->
        case view (clConns . at net) cl of
-         Nothing -> return (cl, 1)
+         Nothing -> return (1, cl)
          Just conn ->
            do sendConnection conn str
-              return (cl, 0)
+              return (0, cl)
 
 ------------------------------------------------------------------------
 
@@ -181,11 +186,11 @@ ircclient_unhook token hookId =
      hooks <- readIORef (hooksRef cext)
      writeIORef (hooksRef cext) (Bag.delete key hooks)
      case preview (ix key) hooks of
-       Nothing -> return (cl, nullPtr)
+       Nothing -> return (nullPtr, cl)
        Just (CommandHook cmd prio i ptr) ->
-         return (cl & clExts . ix extId . onCommand %~ HookMap.remove cmd prio i, ptr)
+         return (ptr, cl & clExts . ix extId . onCommand %~ HookMap.remove cmd prio i)
        Just (MessageHook cmd prio i ptr) ->
-         return (cl & clExts . ix extId . onMessage %~ HookMap.remove cmd prio i, ptr)
+         return (ptr, cl & clExts . ix extId . onMessage %~ HookMap.remove cmd prio i)
 
 ------------------------------------------------------------------------
 
@@ -205,7 +210,7 @@ type HookCommand =
   IO CLong
 ircclient_hook_command :: HookCommand
 ircclient_hook_command token namePtr nameLen prio fp _helpPtr _helpLen userPtr =
-  Text.peekCStringLen (namePtr, fromIntegral nameLen) >>= \name ->
+  peekText namePtr nameLen >>= \name ->
   let priority = fromIntegral prio in
   reentry token \cext cl ->
     do extId <- readIORef (extIdRef cext)
@@ -217,7 +222,7 @@ ircclient_hook_command token namePtr nameLen prio fp _helpPtr _helpLen userPtr =
        let (Bag.Key hookId, hooks') = Bag.insert (CommandHook name priority i userPtr) hooks
        writeIORef (hooksRef cext) hooks'
 
-       return (cl1, fromIntegral hookId)
+       return (fromIntegral hookId, cl1)
 
 commandWrapper ::
   CExtension ->
@@ -257,7 +262,7 @@ type HookMessage =
   IO CLong
 ircclient_hook_message :: HookMessage
 ircclient_hook_message token namePtr nameLen prio fp userPtr =
-  Text.peekCStringLen (namePtr, fromIntegral nameLen) >>= \name ->
+  peekText namePtr nameLen >>= \name ->
   let priority = fromIntegral prio in
   reentry token \cext cl ->
     do extId <- readIORef (extIdRef cext)
@@ -269,7 +274,7 @@ ircclient_hook_message token namePtr nameLen prio fp userPtr =
        let (Bag.Key hookId, hooks') = Bag.insert (MessageHook name priority i userPtr) hooks
        writeIORef (hooksRef cext) hooks'
 
-       return (cl1, fromIntegral hookId)
+       return (fromIntegral hookId, cl1)
 
 cMessage ::
   CExtension ->
@@ -298,6 +303,32 @@ cMessage cext ptr fp net msg cl =
 
 ------------------------------------------------------------------------
 
+type StringsCb = Ptr CString -> Ptr CSize -> CSize -> Ptr () -> IO ()
+
+type Query = Ptr () -> CString -> CSize -> FunPtr StringsCb -> Ptr () -> IO CInt
+ircclient_query :: Query
+ircclient_query stab keyPtr keyLen cb user =
+  reentry stab \cext cl ->
+  do key <- peekText keyPtr keyLen
+
+     mbTxts <-
+       case key of
+         "connections" -> return (Just (Map.keys (view clConns cl)))
+         _             -> return Nothing
+
+     case mbTxts of
+       Nothing -> return (1, cl)
+       Just txts ->
+         evalWithIO $
+         exportTexts txts >>= \(strs, sizes, len) ->
+         liftIO (parked cext cl (0 <$ dynStringsCb cb strs sizes len user))
+
+
+------------------------------------------------------------------------
+
+peekText :: CString -> CSize -> IO Text
+peekText ptr size = Text.peekCStringLen (ptr, fromIntegral size)
+
 exportTexts :: [Text] -> WithIO (Ptr CString, Ptr CSize, CSize)
 exportTexts txts =
   do (ptrs, sizes) <- unzip <$> traverse exportText txts
@@ -309,7 +340,7 @@ eolWords :: Text -> [Text]
 eolWords start = go (noSpaces start)
   where
     noSpaces = Text.dropWhile isSpace
-    toSpaces = Text.dropWhile isSpace
+    toSpaces = Text.dropWhile (not . isSpace)
 
     go txt
       | Text.null txt = []

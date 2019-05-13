@@ -141,12 +141,41 @@ static int lib_print(lua_State *L)
         return 0;
 }
 
+static strings_cb pushstrings;
+static void pushstrings(const char **strs, const size_t *lens, size_t n, void * u)
+{
+    lua_State * const L = u;
+
+    lua_createtable(L, n, 0);
+
+    for (int i = 0; i < n; i++) {
+        lua_pushlstring(L, strs[i], lens[i]);
+        lua_rawseti(L, -2, i+1);
+    }
+}
+
+static int lib_query(lua_State *L)
+{
+    size_t keylen;
+    const char *key = luaL_checklstring(L, 1, &keylen);
+    luaL_checktype(L, 2, LUA_TNONE);
+
+    int const rc = CALL(query, L, key, keylen, pushstrings, L);
+
+    if (rc) {
+        return luaL_error(L, "query failed");
+    } else {
+        return 1;
+    }
+}
+
 static luaL_Reg irc_lib[] =
-  { { "writeline", lib_writeline}
-  , { "send"     , lib_send }
+  { { "writeline",    lib_writeline}
+  , { "send"     ,    lib_send }
   , { "hook_command", lib_hook_command }
   , { "hook_message", lib_hook_message }
-  , { "unhook", lib_unhook }
+  , { "query",        lib_query }
+  , { "unhook",       lib_unhook }
   , {}
   };
 

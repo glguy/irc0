@@ -1,0 +1,8 @@
+{
+ircclient_print;
+ircclient_send;
+ircclient_hook_command;
+ircclient_hook_message;
+ircclient_unhook;
+ircclient_query;
+};

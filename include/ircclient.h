@@ -53,5 +53,8 @@ hook_id ircclient_hook_message
 
 void *ircclient_unhook (struct ircclient *token, hook_id id);
 
+typedef void strings_cb(const char **strs, const size_t *, size_t, void *);
+
+int ircclient_query (struct ircclient *token, const char *, size_t, strings_cb*, void *);
 
 #endif
