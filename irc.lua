@@ -1,4 +1,3 @@
-irc.writeline('File works')
 
 local function eval(args, args_eol)
         local chunk, err = load(args_eol[1], '=(eval)', 't')
@@ -45,5 +44,7 @@ irc.hook_message('NOTICE', 0, onNotice)
 local M = {}
 
 function M.shutdown() end
+
+irc.writeline('File works')
 
 return M

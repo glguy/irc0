@@ -3,16 +3,21 @@ cabal-version:          2.4
 name:                   irc0
 version:                0.1.0.0
 synopsis:               Bare-bones, programmable IRC client
+
 description:            This client focuses and providing a thin skeleton
                         of an IRC client which support adding functionality
                         via loadable modules.
+
 bug-reports:            https://github.com/glguy/irc0/issues
 license:                ISC
 license-file:           LICENSE
 author:                 Eric Mertens
 maintainer:             emertens@gmail.com
 copyright:              2019 Eric Mertens
-extra-source-files:     CHANGELOG.md
+
+extra-source-files:
+  macos_exported_symbols.txt
+  linux_exported_symbols.txt
 
 executable irc0
 
@@ -53,6 +58,6 @@ executable irc0
 
 
   if os(Linux)
-      ld-options: -Wl,--dynamic-list=exec/linux_exported_symbols.txt
+      ld-options: -Wl,--dynamic-list=linux_exported_symbols.txt
   if os(Darwin)
       ld-options: -Wl,-exported_symbols_list,macos_exported_symbols.txt
